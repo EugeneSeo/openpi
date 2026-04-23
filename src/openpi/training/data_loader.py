@@ -7,6 +7,8 @@ from typing import Literal, Protocol, SupportsIndex, TypeVar
 
 import jax
 import jax.numpy as jnp
+import datasets
+from datasets.features import features as hf_features
 import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
@@ -17,6 +19,19 @@ from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
 
 T_co = TypeVar("T_co", covariant=True)
+
+
+################################################################################
+# DreamZero eval comparison additions.
+#
+# The bag_groceries_communal LeRobot v2.0 parquet files were written with
+# HuggingFace feature metadata that uses "_type": "List" for fixed-length
+# vector columns. The datasets version pinned by OpenPI/LeRobot no longer
+# registers that legacy name, but it can deserialize the same schema as
+# Sequence(feature=..., length=...). Keep this compatibility shim local to the
+# OpenPI loader so the scratch dataset does not need to be rewritten.
+################################################################################
+hf_features._FEATURE_TYPES.setdefault("List", datasets.Sequence)
 
 
 class Dataset(Protocol[T_co]):
@@ -60,6 +75,35 @@ class TransformedDataset(Dataset[T_co]):
 
     def __len__(self) -> int:
         return len(self._dataset)
+
+
+class EpisodeSubsetDataset(Dataset[T_co]):
+    """Filters a frame-level LeRobot dataset to a set of episode indices."""
+
+    def __init__(self, dataset: Dataset, episode_indices: Sequence[int]):
+        self._dataset = dataset
+        episode_set = {int(i) for i in episode_indices}
+
+        hf_dataset = getattr(dataset, "hf_dataset", None)
+        if hf_dataset is not None and "episode_index" in getattr(hf_dataset, "column_names", []):
+            self._indices = [
+                i for i, episode_index in enumerate(hf_dataset["episode_index"]) if int(episode_index) in episode_set
+            ]
+        else:
+            self._indices = []
+            for i in range(len(dataset)):
+                item = dataset[i]
+                if int(np.asarray(item["episode_index"])) in episode_set:
+                    self._indices.append(i)
+
+        if not self._indices:
+            raise ValueError(f"Episode split produced an empty dataset for episodes {sorted(episode_set)}")
+
+    def __getitem__(self, index: SupportsIndex) -> T_co:
+        return self._dataset[self._indices[index.__index__()]]
+
+    def __len__(self) -> int:
+        return len(self._indices)
 
 
 class IterableTransformedDataset(IterableDataset[T_co]):
@@ -138,12 +182,22 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-    dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
-        delta_timestamps={
+    dataset_kwargs = {
+        "delta_timestamps": {
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
-    )
+    }
+    if data_config.video_backend is not None:
+        dataset_kwargs["video_backend"] = data_config.video_backend
+
+    dataset = lerobot_dataset.LeRobotDataset(data_config.repo_id, **dataset_kwargs)
+
+    if data_config.episode_indices is not None:
+        # For this DreamZero comparison dataset, the LeRobot v2.0 parquet rows keep original episode_index values
+        # even when LeRobotDataset is constructed with episodes=[...]. That makes LeRobot's reduced
+        # episode_data_index incompatible with original ids (e.g. episode 294 indexing a 270-episode table).
+        # Build the full local dataset and filter frame indices here instead of rewriting the scratch dataset.
+        dataset = EpisodeSubsetDataset(dataset, data_config.episode_indices)
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])

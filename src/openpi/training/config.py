@@ -4,6 +4,7 @@ import abc
 from collections.abc import Sequence
 import dataclasses
 import difflib
+import json
 import logging
 import pathlib
 from typing import Any, Literal, Protocol, TypeAlias
@@ -19,8 +20,10 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
+import openpi.policies.franka_orca_policy as franka_orca_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
@@ -69,6 +72,11 @@ class DataConfig:
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
     norm_stats: dict[str, _transforms.NormStats] | None = None
+    # Optional episode subset. Used for train/validation splits without editing the dataset.
+    episode_indices: Sequence[int] | None = None
+    # Optional LeRobot video backend override. Useful when torchcodec is installed but unusable because FFmpeg
+    # shared libraries are unavailable on the cluster node.
+    video_backend: str | None = None
 
     # Used to adopt the inputs from a dataset specific format to a common format
     # which is expected by the data transforms.
@@ -462,6 +470,90 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
         )
 
 
+################################################################################
+# DreamZero Eval Comparison: Franka/ORCA Bag-Groceries pi0.5 Transfer
+################################################################################
+# This block is added for comparing DreamZero eval/training behavior against a
+# pi0.5-base OpenPI run on the same bimanual Franka + ORCA hand embodiment.
+#
+# Dataset convention:
+#   - LeRobot v2 dataset, 50Hz, two RGB videos.
+#   - 48D state/action order:
+#       left arm 0:7, left hand 7:24, right arm 24:31, right hand 31:48.
+#   - Raw parquet actions are absolute targets.
+#
+# DreamZero convention to match:
+#   - action_horizon=24.
+#   - train target is relative action: raw_action[t:t+24] - state[t].
+#   - inference output must be converted back with predicted_relative + state.
+#
+# OpenPI implementation below:
+#   - Prompt comes from LeRobot task_index -> meta/tasks.jsonl mapping.
+#   - DeltaActions([True] * 48) creates the same relative-action target.
+#   - AbsoluteActions([True] * 48) reverses it for inference.
+#   - Fresh OpenPI norm stats must be computed after this transform stack.
+################################################################################
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotFrankaOrcaDataConfig(DataConfigFactory):
+    """Data config for DreamZero Franka/ORCA bag-groceries comparison runs."""
+
+    action_sequence_keys: Sequence[str] = ("action",)
+    split_path: str | None = (
+        "/cluster/project/cvg/students/eugseo/workspace/bag_groceries_communal/"
+        "bag_groceries_seed42_90_10.json"
+    )
+    split: str = "train"
+    video_backend: str | None = "pyav"
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/oakd_front_view": "observation.images.oakd_front_view",
+                        "observation/aria_rgb_cam": "observation.images.aria_rgb_cam",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        relative_action_mask = (True,) * franka_orca_policy.FRANKA_ORCA_ACTION_DIM
+        data_transforms = _transforms.Group(
+            inputs=[franka_orca_policy.FrankaOrcaInputs(model_type=model_config.model_type)],
+            outputs=[franka_orca_policy.FrankaOrcaOutputs()],
+        ).push(
+            inputs=[_transforms.DeltaActions(relative_action_mask)],
+            outputs=[_transforms.AbsoluteActions(relative_action_mask)],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        episode_indices = None
+        if self.split_path is not None:
+            with open(self.split_path) as f:
+                split_spec = json.load(f)
+            key = f"{self.split}_episode_indices"
+            if key not in split_spec:
+                raise ValueError(f"Split file {self.split_path} does not contain {key}")
+            episode_indices = tuple(split_spec[key])
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+            episode_indices=episode_indices,
+            video_backend=self.video_backend,
+        )
+
+
 @dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
@@ -499,6 +591,8 @@ class TrainConfig:
     assets_base_dir: str = "./assets"
     # Base directory for checkpoints.
     checkpoint_base_dir: str = "./checkpoints"
+    # Optional source checkpoint directory to initialize from while writing to a new experiment directory.
+    init_from_checkpoint_dir: str | None = None
 
     # Random seed that will be used by random generators during training.
     seed: int = 42
@@ -514,8 +608,20 @@ class TrainConfig:
     log_interval: int = 100
     # How often (in steps) to save checkpoints.
     save_interval: int = 1000
+    # Optional validation interval. If set, a validation loader is built from the same config with split="val".
+    val_interval: int | None = None
+    # Number of validation batches to average at each validation interval.
+    val_batches: int = 10
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
+    # If true, writes normal OpenPI full checkpoints with complete params and train_state.
+    save_full_checkpoints: bool = True
+    # If true, writes a normal full `best_val/` checkpoint when validation improves.
+    save_full_best_val_checkpoint: bool = True
+    # If true, also writes compact adapter checkpoints containing only the trainable parameter subset plus assets.
+    save_adapter_checkpoints: bool = False
+    # If > 0, additionally keeps a rolling window of compact resumable adapter checkpoints.
+    adapter_history_to_keep: int = 0
 
     # If true, will overwrite the checkpoint directory if it already exists.
     overwrite: bool = False
@@ -524,6 +630,8 @@ class TrainConfig:
 
     # If true, will enable wandb logging.
     wandb_enabled: bool = True
+    # If true, logs first-batch camera images to W&B for visual sanity checks.
+    log_wandb_images: bool = True
 
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
@@ -554,6 +662,28 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
+        if self.resume and self.init_from_checkpoint_dir is not None:
+            raise ValueError("Cannot use --resume together with --init-from-checkpoint-dir.")
+
+
+def _franka_orca_pi05_adapter_freeze_filter() -> Filter:
+    ################################################################################
+    # DreamZero Eval Comparison: compact LoRA/action adapter training
+    ################################################################################
+    # The default OpenPI LoRA freeze filter only freezes non-LoRA LLM weights; it can
+    # still train large non-LLM components. For this comparison we want a compact,
+    # reproducible adapter checkpoint, so only LoRA leaves and the pi0.5 action/time
+    # projection leaves remain trainable. The compact checkpoint saver stores exactly
+    # the complementary TrainConfig.trainable_filter subset.
+    ################################################################################
+    adapter_filter = nnx.Any(
+        nnx_utils.PathRegex(".*lora.*"),
+        nnx_utils.PathRegex(".*action_in_proj.*"),
+        nnx_utils.PathRegex(".*action_out_proj.*"),
+        nnx_utils.PathRegex(".*time_mlp_in.*"),
+        nnx_utils.PathRegex(".*time_mlp_out.*"),
+    )
+    return nnx.All(nnx.Param, nnx.Not(adapter_filter))
 
 
 # Use `get_config` if you need to get a config by name in your code.
@@ -915,6 +1045,57 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
         num_train_steps=20_000,
         batch_size=32,
+    ),
+    ################################################################################
+    # DreamZero Eval Comparison: Franka/ORCA Bag-Groceries pi0.5-Base
+    ################################################################################
+    # Use this config to LoRA-tune pi0.5-base on the same bimanual Franka/ORCA
+    # dataset used by DreamZero's Franka eval/training script. It intentionally
+    # keeps the DreamZero temporal/control setup (48D state/action, 24-step
+    # relative action chunks) while using OpenPI's pi0.5-base initialization.
+    #
+    # Before training:
+    #   1. Symlink the dataset under HF_LEROBOT_HOME/local/bag_groceries_communal.
+    #   2. Run scripts/compute_norm_stats.py for this config.
+    #
+    # The shape-aware loader is required because pi0.5-base is 32D by default,
+    # while this comparison uses 48D Franka/ORCA actions.
+    ################################################################################
+    TrainConfig(
+        name="pi05_franka_orca_bag_groceries",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=franka_orca_policy.FRANKA_ORCA_ACTION_DIM,
+            action_horizon=24,
+            max_token_len=250,
+        ),
+        data=LeRobotFrankaOrcaDataConfig(
+            repo_id="local/bag_groceries_communal",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.ShapeAwareCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=250,
+            peak_lr=1e-5,
+            decay_steps=5_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=_franka_orca_pi05_adapter_freeze_filter(),
+        ema_decay=None,
+        num_train_steps=5_000,
+        batch_size=8,
+        log_interval=10,
+        save_interval=500,
+        val_interval=500,
+        val_batches=20,
+        keep_period=1_000,
+        save_adapter_checkpoints=True,
+        num_workers=1,
     ),
     #
     # ALOHA Sim configs. This config is used to demonstrate how to train on a simple simulated environment.

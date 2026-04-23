@@ -1,6 +1,8 @@
 import dataclasses
 import functools
+import json
 import logging
+import os
 import platform
 from typing import Any
 
@@ -68,6 +70,18 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
 
     if log_code:
         wandb.run.log_code(epath.Path(__file__).parent.parent)
+
+
+def _load_best_val_loss(checkpoint_dir: epath.Path) -> float:
+    for metadata_path in [
+        checkpoint_dir / "adapter_best_val" / "metadata.json",
+        checkpoint_dir / "best_val" / "metadata.json",
+    ]:
+        if metadata_path.exists():
+            metadata = json.loads(metadata_path.read_text())
+            if "val_loss" in metadata:
+                return float(metadata["val_loss"])
+    return float("inf")
 
 
 def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shape: at.Params) -> at.Params:
@@ -191,6 +205,27 @@ def train_step(
     return new_state, info
 
 
+@at.typecheck
+def val_step(
+    config: _config.TrainConfig,
+    rng: at.KeyArrayLike,
+    state: training_utils.TrainState,
+    batch: tuple[_model.Observation, _model.Actions],
+) -> dict[str, at.Array]:
+    model = nnx.merge(state.model_def, state.params)
+    model.eval()
+
+    @at.typecheck
+    def loss_fn(
+        model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
+    ):
+        chunked_loss = model.compute_loss(rng, observation, actions, train=False)
+        return jnp.mean(chunked_loss)
+
+    observation, actions = batch
+    return {"val_loss": loss_fn(model, rng, observation, actions)}
+
+
 def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
@@ -200,7 +235,8 @@ def main(config: _config.TrainConfig):
             f"Batch size {config.batch_size} must be divisible by the number of devices {jax.device_count()}."
         )
 
-    jax.config.update("jax_compilation_cache_dir", str(epath.Path("~/.cache/jax").expanduser()))
+    jax_cache_dir = os.environ.get("JAX_COMPILATION_CACHE_DIR", "~/.cache/jax")
+    jax.config.update("jax_compilation_cache_dir", str(epath.Path(jax_cache_dir).expanduser()))
 
     rng = jax.random.key(config.seed)
     train_rng, init_rng = jax.random.split(rng)
@@ -215,30 +251,54 @@ def main(config: _config.TrainConfig):
         overwrite=config.overwrite,
         resume=config.resume,
     )
-    init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+    init_from_checkpoint_dir = (
+        epath.Path(config.init_from_checkpoint_dir).resolve() if config.init_from_checkpoint_dir is not None else None
+    )
+    adapter_resume = config.resume and (config.checkpoint_dir / "adapter_latest" / "train_state").exists()
+    init_wandb(config, resuming=resuming or adapter_resume, enabled=config.wandb_enabled)
 
     data_loader = _data_loader.create_data_loader(
         config,
         sharding=data_sharding,
         shuffle=True,
     )
+    val_loader = None
+    if config.val_interval is not None:
+        if not dataclasses.is_dataclass(config.data) or not hasattr(config.data, "split"):
+            raise ValueError("Validation requires a data config with a 'split' field.")
+        val_data = dataclasses.replace(config.data, split="val")
+        val_config = dataclasses.replace(config, data=val_data)
+        val_loader = _data_loader.create_data_loader(
+            val_config,
+            sharding=data_sharding,
+            shuffle=False,
+            num_batches=config.val_batches,
+        )
+
     data_iter = iter(data_loader)
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
     # Log images from first batch to sanity check.
-    images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
-    ]
-    wandb.log({"camera_views": images_to_log}, step=0)
+    if config.log_wandb_images:
+        images_to_log = [
+            wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
+            for i in range(min(5, len(next(iter(batch[0].images.values())))))
+        ]
+        wandb.log({"camera_views": images_to_log}, step=0)
 
-    train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
+    train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming and not adapter_resume)
     jax.block_until_ready(train_state)
     logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
 
-    if resuming:
+    if adapter_resume:
+        train_state = _checkpoints.restore_adapter_state(config.checkpoint_dir / "adapter_latest", train_state)
+        logging.info("Restored minimal adapter checkpoint from adapter_latest.")
+    elif resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
+    elif init_from_checkpoint_dir is not None:
+        train_state = _checkpoints.restore_adapter_state(init_from_checkpoint_dir / "adapter_latest", train_state)
+        logging.info("Initialized new run from adapter checkpoint at %s.", init_from_checkpoint_dir / "adapter_latest")
 
     ptrain_step = jax.jit(
         functools.partial(train_step, config),
@@ -246,6 +306,13 @@ def main(config: _config.TrainConfig):
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
     )
+    pval_step = None
+    if val_loader is not None:
+        pval_step = jax.jit(
+            functools.partial(val_step, config),
+            in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
+            out_shardings=replicated_sharding,
+        )
 
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
@@ -256,6 +323,7 @@ def main(config: _config.TrainConfig):
     )
 
     infos = []
+    best_val_loss = _load_best_val_loss(config.checkpoint_dir) if config.resume else float("inf")
     for step in pbar:
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
@@ -270,7 +338,72 @@ def main(config: _config.TrainConfig):
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
-            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            if config.save_full_checkpoints:
+                _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            if config.save_adapter_checkpoints:
+                _checkpoints.save_adapter_state(
+                    config.checkpoint_dir / "adapter_latest",
+                    train_state,
+                    data_loader,
+                    step,
+                    config.trainable_filter,
+                    include_train_state=True,
+                    metadata={"kind": "latest"},
+                )
+                if config.adapter_history_to_keep > 0:
+                    adapter_history_dir = config.checkpoint_dir / "adapter_history"
+                    _checkpoints.save_adapter_state(
+                        adapter_history_dir / f"step_{step:06d}",
+                        train_state,
+                        data_loader,
+                        step,
+                        config.trainable_filter,
+                        include_train_state=True,
+                        metadata={"kind": "history", "history_to_keep": config.adapter_history_to_keep},
+                    )
+                    _checkpoints.prune_adapter_history(adapter_history_dir, config.adapter_history_to_keep)
+
+        if (
+            val_loader is not None
+            and pval_step is not None
+            and config.val_interval is not None
+            and ((step % config.val_interval == 0 and step > start_step) or step == config.num_train_steps - 1)
+        ):
+            val_infos = []
+            val_iter = iter(val_loader)
+            for val_batch_idx, val_batch in zip(range(config.val_batches), val_iter, strict=False):
+                val_rng = jax.random.fold_in(train_rng, int(train_state.step) + val_batch_idx)
+                with sharding.set_mesh(mesh):
+                    val_infos.append(pval_step(val_rng, train_state, val_batch))
+
+            stacked_val_infos = common_utils.stack_forest(val_infos)
+            reduced_val_info = jax.device_get(jax.tree.map(jnp.mean, stacked_val_infos))
+            val_loss = float(reduced_val_info["val_loss"])
+            pbar.write(f"Step {step}: val_loss={val_loss:.4f}")
+            wandb.log(reduced_val_info, step=step)
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                if config.save_full_checkpoints:
+                    checkpoint_manager.wait_until_finished()
+                if config.save_full_checkpoints and config.save_full_best_val_checkpoint:
+                    _checkpoints.save_best_val_state(
+                        config.checkpoint_dir / "best_val",
+                        train_state,
+                        data_loader,
+                        step,
+                        val_loss,
+                    )
+                if config.save_adapter_checkpoints:
+                    _checkpoints.save_adapter_state(
+                        config.checkpoint_dir / "adapter_best_val",
+                        train_state,
+                        data_loader,
+                        step,
+                        config.trainable_filter,
+                        metadata={"kind": "best_val", "val_loss": val_loss},
+                    )
+                pbar.write(f"Step {step}: updated best_val checkpoint (val_loss={val_loss:.4f})")
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()
