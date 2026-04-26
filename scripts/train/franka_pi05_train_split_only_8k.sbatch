@@ -19,10 +19,20 @@ set -euo pipefail
 #   checkpoints for offline validation-based selection after training.
 ################################################################################
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-WORKSPACE_ROOT="$(cd "$ROOT_DIR/../../../.." && pwd)"
-LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
+DREAMZERO_ROOT="${DREAMZERO_ROOT:-/cluster/project/cvg/students/eugseo/workspace/dreamzero}"
+ROOT_DIR="${ROOT_DIR:-$DREAMZERO_ROOT/dreamdifferent/baseline/openpi}"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(cd "$DREAMZERO_ROOT/.." && pwd)}"
+DEFAULT_LOG_DIR="$WORKSPACE_ROOT/logs"
+if [ -z "${LOG_DIR:-}" ] || [ "$LOG_DIR" = "/logs" ] || [ "$LOG_DIR" = "//logs" ]; then
+  LOG_DIR="$DEFAULT_LOG_DIR"
+fi
+
+if [ ! -d "$ROOT_DIR" ]; then
+  echo "ERROR: ROOT_DIR does not exist: $ROOT_DIR"
+  echo "Set DREAMZERO_ROOT or ROOT_DIR explicitly before submitting."
+  exit 1
+fi
+
 cd "$ROOT_DIR"
 
 EXP_NAME="${EXP_NAME:-pi05_train_split_bs16_8k_${SLURM_JOB_ID:-manual}}"

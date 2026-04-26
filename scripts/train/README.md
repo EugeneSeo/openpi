@@ -18,14 +18,44 @@ If you run them on another machine or under another account, update the paths
 and resource requests accordingly.
 
 The sbatch files intentionally do not hardcode a Slurm output/error path. A
-common pattern is to submit them with an explicit log directory, for example:
+common pattern is to submit them with an explicit DreamZero root and log
+directory, for example:
 
 ```bash
-OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
-WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
+DREAMZERO_ROOT=/cluster/project/cvg/students/eugseo/workspace/dreamzero
+OPENPI_ROOT="$DREAMZERO_ROOT/dreamdifferent/baseline/openpi"
+WORKSPACE_ROOT="$(cd "$DREAMZERO_ROOT/.." && pwd)"
 LOG_DIR="$WORKSPACE_ROOT/logs"
 mkdir -p "$LOG_DIR"
 ```
+
+## First-Time Submodule Setup
+
+If this OpenPI checkout was pulled in as a fresh submodule, prepare its local
+environment once on a login node before launching `sbatch` jobs:
+
+```bash
+DREAMZERO_ROOT=/cluster/project/cvg/students/eugseo/workspace/dreamzero
+OPENPI_ROOT="$DREAMZERO_ROOT/dreamdifferent/baseline/openpi"
+
+cd "$OPENPI_ROOT"
+mkdir -p "$OPENPI_ROOT/tmp/uv-cache"
+UV_CACHE_DIR="$OPENPI_ROOT/tmp/uv-cache" uv sync
+```
+
+This matters because the Euler compute nodes may not have outbound GitHub
+access. If the submodule does not already have a prepared `.venv`, `uv run`
+inside the job can fail while trying to fetch the `lerobot` dependency.
+
+You can sanity-check the environment with:
+
+```bash
+cd "$OPENPI_ROOT"
+UV_CACHE_DIR="$OPENPI_ROOT/tmp/uv-cache" uv pip show lerobot
+```
+
+If the OpenPI submodule dependencies change later, rerun `uv sync` from the
+same directory.
 
 If the bag-groceries dataset is not already present on your Euler scratch, copy
 it first from the ETH student cluster:
@@ -146,12 +176,14 @@ before submission. By default it evaluates the latest 10 checkpoints with
 ### Train split only, fresh run
 
 ```bash
-OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
-WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
+DREAMZERO_ROOT=/cluster/project/cvg/students/eugseo/workspace/dreamzero
+OPENPI_ROOT="$DREAMZERO_ROOT/dreamdifferent/baseline/openpi"
+WORKSPACE_ROOT="$(cd "$DREAMZERO_ROOT/.." && pwd)"
 LOG_DIR="$WORKSPACE_ROOT/logs"
 mkdir -p "$LOG_DIR"
 
 cd "$OPENPI_ROOT"
+DREAMZERO_ROOT="$DREAMZERO_ROOT" \
 sbatch \
   --output "$LOG_DIR/%x-%j.out" \
   --error "$LOG_DIR/%x-%j.err" \
@@ -161,12 +193,14 @@ sbatch \
 ### All episodes, fresh run
 
 ```bash
-OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
-WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
+DREAMZERO_ROOT=/cluster/project/cvg/students/eugseo/workspace/dreamzero
+OPENPI_ROOT="$DREAMZERO_ROOT/dreamdifferent/baseline/openpi"
+WORKSPACE_ROOT="$(cd "$DREAMZERO_ROOT/.." && pwd)"
 LOG_DIR="$WORKSPACE_ROOT/logs"
 mkdir -p "$LOG_DIR"
 
 cd "$OPENPI_ROOT"
+DREAMZERO_ROOT="$DREAMZERO_ROOT" \
 sbatch \
   --output "$LOG_DIR/%x-%j.out" \
   --error "$LOG_DIR/%x-%j.err" \
@@ -176,12 +210,14 @@ sbatch \
 ### Resume an existing run
 
 ```bash
-OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
-WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
+DREAMZERO_ROOT=/cluster/project/cvg/students/eugseo/workspace/dreamzero
+OPENPI_ROOT="$DREAMZERO_ROOT/dreamdifferent/baseline/openpi"
+WORKSPACE_ROOT="$(cd "$DREAMZERO_ROOT/.." && pwd)"
 LOG_DIR="$WORKSPACE_ROOT/logs"
 mkdir -p "$LOG_DIR"
 
 cd "$OPENPI_ROOT"
+DREAMZERO_ROOT="$DREAMZERO_ROOT" \
 EXP_NAME=<existing_exp_name> \
 RESUME=1 \
 NUM_TRAIN_STEPS=1000 \
@@ -196,12 +232,14 @@ sbatch \
 ### Branch from an existing run
 
 ```bash
-OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
-WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
+DREAMZERO_ROOT=/cluster/project/cvg/students/eugseo/workspace/dreamzero
+OPENPI_ROOT="$DREAMZERO_ROOT/dreamdifferent/baseline/openpi"
+WORKSPACE_ROOT="$(cd "$DREAMZERO_ROOT/.." && pwd)"
 LOG_DIR="$WORKSPACE_ROOT/logs"
 mkdir -p "$LOG_DIR"
 
 cd "$OPENPI_ROOT"
+DREAMZERO_ROOT="$DREAMZERO_ROOT" \
 EXP_NAME=<new_exp_name> \
 INIT_FROM_EXP_NAME=<source_exp_name> \
 NUM_TRAIN_STEPS=1000 \
@@ -217,12 +255,14 @@ checkpoint.
 ### Evaluate the latest checkpoint window on the validation split
 
 ```bash
-OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
-WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
+DREAMZERO_ROOT=/cluster/project/cvg/students/eugseo/workspace/dreamzero
+OPENPI_ROOT="$DREAMZERO_ROOT/dreamdifferent/baseline/openpi"
+WORKSPACE_ROOT="$(cd "$DREAMZERO_ROOT/.." && pwd)"
 LOG_DIR="$WORKSPACE_ROOT/logs"
 mkdir -p "$LOG_DIR"
 
 cd "$OPENPI_ROOT"
+DREAMZERO_ROOT="$DREAMZERO_ROOT" \
 CHECKPOINT_DIR=/cluster/scratch/eugseo/openpi_checkpoints/pi05_franka_orca_bag_groceries/<exp_name> \
 sbatch \
   --output "$LOG_DIR/%x-%j.out" \
