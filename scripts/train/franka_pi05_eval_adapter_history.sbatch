@@ -5,8 +5,6 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem-per-cpu=16G
 #SBATCH --gpus=rtx_4090:1
-#SBATCH --output=/cluster/project/cvg/students/eugseo/workspace/logs/%x-%j.out
-#SBATCH --error=/cluster/project/cvg/students/eugseo/workspace/logs/%x-%j.err
 
 set -euo pipefail
 
@@ -22,7 +20,10 @@ set -euo pipefail
 # - Writes adapter_history_val_eval.json/.md into the checkpoint directory.
 ################################################################################
 
-ROOT_DIR="/cluster/project/cvg/students/eugseo/workspace/openpi"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+WORKSPACE_ROOT="$(cd "$ROOT_DIR/../../../.." && pwd)"
+LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
 cd "$ROOT_DIR"
 
 if [ -z "${CHECKPOINT_DIR:-}" ]; then
@@ -40,7 +41,7 @@ NUM_WORKERS="${NUM_WORKERS:-1}"
 RUN_NAME="${RUN_NAME:-eval_$(basename "$CHECKPOINT_DIR")_${SLURM_JOB_ID:-manual}}"
 RUN_TMP_DIR="$ROOT_DIR/tmp/${RUN_NAME}"
 
-mkdir -p /cluster/project/cvg/students/eugseo/workspace/logs
+mkdir -p "$LOG_DIR"
 mkdir -p "$RUN_TMP_DIR/uv-cache" "$RUN_TMP_DIR/jax-cache"
 mkdir -p /cluster/scratch/eugseo/hf_home /cluster/scratch/eugseo/hf_datasets_cache
 mkdir -p /cluster/scratch/eugseo/lerobot_home/local

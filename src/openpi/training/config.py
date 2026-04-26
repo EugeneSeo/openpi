@@ -500,9 +500,11 @@ class LeRobotFrankaOrcaDataConfig(DataConfigFactory):
     """Data config for DreamZero Franka/ORCA bag-groceries comparison runs."""
 
     action_sequence_keys: Sequence[str] = ("action",)
-    split_path: str | None = (
-        "/cluster/project/cvg/students/eugseo/workspace/bag_groceries_communal/"
-        "bag_groceries_seed42_90_10.json"
+    split_path: str | None = str(
+        pathlib.Path(__file__).resolve().parents[5]
+        / "datasets"
+        / "bag_groceries_communal"
+        / "bag_groceries_seed42_90_10.json"
     )
     split: str = "train"
     video_backend: str | None = "pyav"

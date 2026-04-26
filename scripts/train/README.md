@@ -6,13 +6,26 @@ In particular, they assume:
 
 - Slurm jobs on Euler.
 - Scratch paths under `/cluster/scratch/eugseo/`.
-- Project code under `/cluster/project/cvg/students/eugseo/workspace/openpi`.
-- OpenPI temporary/cache directories under `workspace/openpi/tmp/`.
+- An OpenPI baseline checkout at `dreamdifferent/baseline/openpi/` inside a
+  larger project workspace.
+- OpenPI temporary/cache directories under `baseline/openpi/tmp/`.
 - A local LeRobot dataset symlink at:
   `/cluster/scratch/eugseo/lerobot_home/local/bag_groceries_communal`.
+- Saved split metadata and dataset analysis under
+  `dreamdifferent/datasets/bag_groceries_communal/`.
 
 If you run them on another machine or under another account, update the paths
 and resource requests accordingly.
+
+The sbatch files intentionally do not hardcode a Slurm output/error path. A
+common pattern is to submit them with an explicit log directory, for example:
+
+```bash
+OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
+WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
+LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
+mkdir -p "$LOG_DIR"
+```
 
 If the bag-groceries dataset is not already present on your Euler scratch, copy
 it first from the ETH student cluster:
@@ -133,26 +146,49 @@ before submission. By default it evaluates the latest 10 checkpoints with
 ### Train split only, fresh run
 
 ```bash
-cd /cluster/project/cvg/students/eugseo/workspace/openpi
-sbatch scripts/train/franka_pi05_train_split_only_8k.sbatch
+OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
+WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
+LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
+mkdir -p "$LOG_DIR"
+
+cd "$OPENPI_ROOT"
+sbatch \
+  --output "$LOG_DIR/%x-%j.out" \
+  --error "$LOG_DIR/%x-%j.err" \
+  scripts/train/franka_pi05_train_split_only_8k.sbatch
 ```
 
 ### All episodes, fresh run
 
 ```bash
-cd /cluster/project/cvg/students/eugseo/workspace/openpi
-sbatch scripts/train/franka_pi05_train_all_episodes_8k.sbatch
+OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
+WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
+LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
+mkdir -p "$LOG_DIR"
+
+cd "$OPENPI_ROOT"
+sbatch \
+  --output "$LOG_DIR/%x-%j.out" \
+  --error "$LOG_DIR/%x-%j.err" \
+  scripts/train/franka_pi05_train_all_episodes_8k.sbatch
 ```
 
 ### Resume an existing run
 
 ```bash
-cd /cluster/project/cvg/students/eugseo/workspace/openpi
+OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
+WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
+LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
+mkdir -p "$LOG_DIR"
 
+cd "$OPENPI_ROOT"
 EXP_NAME=<existing_exp_name> \
 RESUME=1 \
 NUM_TRAIN_STEPS=1000 \
-sbatch scripts/train/franka_pi05_train_split_only_8k.sbatch
+sbatch \
+  --output "$LOG_DIR/%x-%j.out" \
+  --error "$LOG_DIR/%x-%j.err" \
+  scripts/train/franka_pi05_train_split_only_8k.sbatch
 ```
 
 `NUM_TRAIN_STEPS` is the final total step target, not the increment.
@@ -160,12 +196,19 @@ sbatch scripts/train/franka_pi05_train_split_only_8k.sbatch
 ### Branch from an existing run
 
 ```bash
-cd /cluster/project/cvg/students/eugseo/workspace/openpi
+OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
+WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
+LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
+mkdir -p "$LOG_DIR"
 
+cd "$OPENPI_ROOT"
 EXP_NAME=<new_exp_name> \
 INIT_FROM_EXP_NAME=<source_exp_name> \
 NUM_TRAIN_STEPS=1000 \
-sbatch scripts/train/franka_pi05_train_split_only_8k.sbatch
+sbatch \
+  --output "$LOG_DIR/%x-%j.out" \
+  --error "$LOG_DIR/%x-%j.err" \
+  scripts/train/franka_pi05_train_split_only_8k.sbatch
 ```
 
 This preserves the source run and starts a new run from its `adapter_latest/`
@@ -174,10 +217,17 @@ checkpoint.
 ### Evaluate the latest checkpoint window on the validation split
 
 ```bash
-cd /cluster/project/cvg/students/eugseo/workspace/openpi
+OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
+WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
+LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
+mkdir -p "$LOG_DIR"
 
+cd "$OPENPI_ROOT"
 CHECKPOINT_DIR=/cluster/scratch/eugseo/openpi_checkpoints/pi05_franka_orca_bag_groceries/<exp_name> \
-sbatch scripts/train/franka_pi05_eval_adapter_history.sbatch
+sbatch \
+  --output "$LOG_DIR/%x-%j.out" \
+  --error "$LOG_DIR/%x-%j.err" \
+  scripts/train/franka_pi05_eval_adapter_history.sbatch
 ```
 
 ## Notes
