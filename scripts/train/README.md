@@ -23,7 +23,7 @@ common pattern is to submit them with an explicit log directory, for example:
 ```bash
 OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
 WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
-LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
+LOG_DIR="$WORKSPACE_ROOT/logs"
 mkdir -p "$LOG_DIR"
 ```
 
@@ -148,7 +148,7 @@ before submission. By default it evaluates the latest 10 checkpoints with
 ```bash
 OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
 WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
-LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
+LOG_DIR="$WORKSPACE_ROOT/logs"
 mkdir -p "$LOG_DIR"
 
 cd "$OPENPI_ROOT"
@@ -163,7 +163,7 @@ sbatch \
 ```bash
 OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
 WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
-LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
+LOG_DIR="$WORKSPACE_ROOT/logs"
 mkdir -p "$LOG_DIR"
 
 cd "$OPENPI_ROOT"
@@ -178,7 +178,7 @@ sbatch \
 ```bash
 OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
 WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
-LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
+LOG_DIR="$WORKSPACE_ROOT/logs"
 mkdir -p "$LOG_DIR"
 
 cd "$OPENPI_ROOT"
@@ -198,7 +198,7 @@ sbatch \
 ```bash
 OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
 WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
-LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
+LOG_DIR="$WORKSPACE_ROOT/logs"
 mkdir -p "$LOG_DIR"
 
 cd "$OPENPI_ROOT"
@@ -219,7 +219,7 @@ checkpoint.
 ```bash
 OPENPI_ROOT=/path/to/dreamzero/dreamdifferent/baseline/openpi
 WORKSPACE_ROOT="$(cd "$OPENPI_ROOT/../../../.." && pwd)"
-LOG_DIR="${LOG_DIR:-$WORKSPACE_ROOT/logs}"
+LOG_DIR="$WORKSPACE_ROOT/logs"
 mkdir -p "$LOG_DIR"
 
 cd "$OPENPI_ROOT"
