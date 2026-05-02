@@ -22,6 +22,7 @@ import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.franka_orca_policy as franka_orca_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.so101_policy as so101_policy
 import openpi.shared.download as _download
 import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
@@ -285,6 +286,43 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
             action_sequence_keys=self.action_sequence_keys,
         )
 
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotSO101DataConfig(DataConfigFactory):
+    action_sequence_keys: Sequence[str] = ("action",)
+    video_backend: str | None = "pyav"
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/images/front": "observation.images.front",
+                        "observation/images/wrist": "observation.images.wrist",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[so101_policy.SO101Inputs(model_type=model_config.model_type)],
+            outputs=[so101_policy.SO101Outputs()],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+            video_backend=self.video_backend,
+        )
 
 @dataclasses.dataclass(frozen=True)
 class LeRobotLiberoDataConfig(DataConfigFactory):
@@ -668,15 +706,16 @@ class TrainConfig:
             raise ValueError("Cannot use --resume together with --init-from-checkpoint-dir.")
 
 
-def _franka_orca_pi05_adapter_freeze_filter() -> Filter:
+def _pi05_compact_adapter_freeze_filter() -> Filter:
     ################################################################################
     # DreamZero Eval Comparison: compact LoRA/action adapter training
     ################################################################################
     # The default OpenPI LoRA freeze filter only freezes non-LoRA LLM weights; it can
-    # still train large non-LLM components. For this comparison we want a compact,
-    # reproducible adapter checkpoint, so only LoRA leaves and the pi0.5 action/time
-    # projection leaves remain trainable. The compact checkpoint saver stores exactly
-    # the complementary TrainConfig.trainable_filter subset.
+    # still train large non-LLM components such as the PaliGemma image encoder.
+    # For these comparison runs we want compact, reproducible adapter checkpoints,
+    # so only LoRA leaves and the pi0.5 action/time projection leaves remain
+    # trainable. The compact checkpoint saver stores exactly the complementary
+    # TrainConfig.trainable_filter subset.
     ################################################################################
     adapter_filter = nnx.Any(
         nnx_utils.PathRegex(".*lora.*"),
@@ -690,6 +729,39 @@ def _franka_orca_pi05_adapter_freeze_filter() -> Filter:
 
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
+    TrainConfig(
+        name="pi05_so101_teleop_test_filtered",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_horizon=24,
+            max_token_len=200,
+        ),
+        data=LeRobotSO101DataConfig(
+            repo_id="local/so101_teleop_test_filtered_openpi",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=250,
+            peak_lr=1e-5,
+            decay_steps=5_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=_pi05_compact_adapter_freeze_filter(),
+        ema_decay=None,
+        num_train_steps=1_000,
+        batch_size=8,
+        log_interval=10,
+        save_interval=250,
+        keep_period=500,
+        save_adapter_checkpoints=True,
+        num_workers=0,
+    ),
     #
     # Inference Aloha configs.
     #
@@ -1087,7 +1159,7 @@ _CONFIGS = [
             decay_lr=1e-5,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        freeze_filter=_franka_orca_pi05_adapter_freeze_filter(),
+        freeze_filter=_pi05_compact_adapter_freeze_filter(),
         ema_decay=None,
         num_train_steps=5_000,
         batch_size=8,

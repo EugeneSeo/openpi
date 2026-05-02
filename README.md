@@ -21,6 +21,41 @@ OpenPI usage docs below, start here:
 
 - [`scripts/train/README.md`](scripts/train/README.md)
 
+### SO101 Adapter Policy Server
+
+The SO101 pi0.5 LoRA runs save compact adapter checkpoints, so they should be
+served with the adapter-aware copy instead of the upstream full-checkpoint
+server:
+
+```bash
+export OPENPI_DATA_HOME=/cluster/project/cvg/students/dohkim/dreamzero/dreamdifferent/baseline/openpi/tmp/openpi-data
+
+uv run scripts/serve_adapter_policy.py \
+  --config=pi05_so101_teleop_test_filtered \
+  --adapter-dir=/cluster/scratch/dohkim/openpi_checkpoints/pi05_so101_teleop_test_filtered/so101_lora_all_episodes_bs16_8k_65239922/adapter_latest \
+  --base-params=/cluster/project/cvg/students/dohkim/dreamzero/dreamdifferent/baseline/openpi/tmp/openpi-data/openpi-assets/checkpoints/pi05_base/params \
+  --port=23261
+```
+
+On Euler, keep the server inside the Slurm job and connect through a tunnel:
+
+```bash
+ssh -N -L 23261:127.0.0.1:23261 euler-tunnel
+```
+
+For a lightweight local smoke test without installing the full OpenPI
+environment:
+
+```bash
+pip install numpy msgpack websockets
+python scripts/test_so101_policy_server_raw.py --host=127.0.0.1 --port=23261
+```
+
+The SO101 robot client should send `observation/images/front`,
+`observation/images/wrist`, `observation/state` with shape `(6,)`, and
+`prompt`. The server returns `actions` with shape `(24, 6)`, where `24` is the
+action horizon.
+
 The rest of this README is the original repository README and remains the main
 reference for general OpenPI installation and usage.
 

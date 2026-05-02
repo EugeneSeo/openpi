@@ -278,3 +278,42 @@ sbatch \
   checkout.
 - The train loss logged by OpenPI here is the pi0.5 flow-matching loss on
   normalized relative-action chunks, not direct raw-action MSE.
+
+## SO101 Absolute vs Delta Action Note
+
+The current SO101 config, `pi05_so101_teleop_test_filtered`, trains on the
+dataset action values as-is. In other words, the model is trained to predict the
+same 6D action convention stored in the converted SO101 LeRobot dataset, and
+the policy server returns a `(24, 6)` chunk of absolute SO101 actions after
+normalization is undone.
+
+This is different from the Franka/ORCA comparison config, which explicitly
+converts actions to relative deltas during training and converts them back to
+absolute actions during inference with `DeltaActions` / `AbsoluteActions`.
+
+If a future SO101 experiment should train the model to predict deltas, update
+`LeRobotSO101DataConfig.create()` in `src/openpi/training/config.py` so the
+SO101 data transform stack mirrors the Franka pattern:
+
+```python
+relative_action_mask = (True,) * so101_policy.SO101_ACTION_DIM
+data_transforms = _transforms.Group(
+    inputs=[so101_policy.SO101Inputs(model_type=model_config.model_type)],
+    outputs=[so101_policy.SO101Outputs()],
+).push(
+    inputs=[_transforms.DeltaActions(relative_action_mask)],
+    outputs=[_transforms.AbsoluteActions(relative_action_mask)],
+)
+```
+
+With this setup, training targets become `action - current_state`, so the model
+internally learns delta actions. Because `AbsoluteActions` is present in the
+output transform stack, the standard policy server will still return absolute
+actions to the robot client (`predicted_delta + current_state`).
+
+If the robot client should receive raw deltas instead, train with
+`DeltaActions` but do not include `AbsoluteActions` in the inference output
+transform stack. This should be done as a separate SO101 delta config or serving
+path, rather than reinterpreting an absolute-action checkpoint as delta. Existing
+SO101 absolute-action checkpoints should not be treated as delta policies; they
+must be retrained with the delta transform for that behavior.
